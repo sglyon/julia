@@ -858,8 +858,7 @@ for (geev, gesvd, gesdd, ggsvd, elty, relty) in
             S      = Array($relty, minmn)
             cmplx  = iseltype(A,Complex)
             if cmplx
-                rwork = Array($relty, job == 'N' ? 5*minmn :
-                              minmn*max(5*minmn+7, 2*max(m,n)+2*minmn+1))
+                rwork = Array($relty, job == 'N' ? 7*minmn : 5*minmn*minmn + 5*minmn) 
             end
             iwork  = Array(BlasInt, 8*minmn)
             info   = Array(BlasInt, 1)
