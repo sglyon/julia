@@ -46,7 +46,7 @@ type REPLBackend
         new(repl_channel, response_channel, in_eval, ans)
 end
 
-function eval_user_input(ast::ANY, backend::REPLBackend)
+function eval_user_input(ast::ANY, backend::REPLBackend, mod::Module=Main)
     iserr, lasterr, bt = false, (), nothing
     while true
         try
@@ -57,9 +57,9 @@ function eval_user_input(ast::ANY, backend::REPLBackend)
                 ans = backend.ans
                 # note: value wrapped in a non-syntax value to avoid evaluating
                 # possibly-invalid syntax (issue #6763).
-                eval(Main, :(ans = $(getindex)($(Any[ans]), 1)))
+                eval(mod, :(ans = $(getindex)($(Any[ans]), 1)))
                 backend.in_eval = true
-                value = eval(Main, ast)
+                value = eval(mod, ast)
                 backend.in_eval = false
                 backend.ans = value
                 put!(backend.response_channel, (value, nothing))
@@ -270,6 +270,11 @@ type ShellCompletionProvider <: CompletionProvider
     r::LineEditREPL
 end
 
+type ModuleREPLCompletionProvider <: CompletionProvider
+    r::LineEditREPL
+    mod::Module
+end
+
 immutable LatexCompletions <: CompletionProvider; end
 
 bytestring_beforecursor(buf::IOBuffer) = bytestring(buf.data[1:buf.ptr-1])
@@ -293,6 +298,13 @@ function complete_line(c::LatexCompletions, s)
     partial = bytestring_beforecursor(LineEdit.buffer(s))
     full = LineEdit.input_string(s)
     ret, range, should_complete = bslash_completions(full, endof(partial))[2]
+    return ret, partial[range], should_complete
+end
+
+function complete_line(c::ModuleREPLCompletionProvider, s)
+    partial = string(c.mod, ".", bytestring_beforecursor(s.input_buffer))
+    full = string(c.mod, ".", LineEdit.input_string(s))
+    ret, range, should_complete = completions(full, endof(partial))
     return ret, partial[range], should_complete
 end
 
@@ -734,6 +746,21 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
             Expr(:call, :(Base.repl_cmd), macroexpand(Expr(:macrocall, symbol("@cmd"),line)), outstream(repl))
         end)
 
+    # Set up Base mode
+    mod_mode = LineEdit.Prompt(".Base> ";
+        prompt_prefix = hascolor ? Base.text_colors[:cyan] : "",
+        prompt_suffix = hascolor ?
+            (repl.envcolors ? Base.input_color : repl.input_color) : "",
+        keymap_func_data = repl,
+        complete = ModuleREPLCompletionProvider(repl, Base),
+        )
+
+    # on_done needs to eval into `mod` instead of into Main.
+    # also keeps the `mod_mode` active, which is why we define on_done here
+    mod_mode.on_done = Base.REPL.respond(repl, mod_mode) do line
+        Expr(:call, :(Base.eval), :(Base.parse_input_line($line)))
+    end
+
 
     ################################# Stage II #############################
 
@@ -741,7 +768,8 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
     # We will have a unified history for all REPL modes
     hp = REPLHistoryProvider(Dict{Symbol,Any}(:julia => julia_prompt,
                                               :shell => shell_mode,
-                                              :help  => help_mode))
+                                              :help  => help_mode,
+                                              :base => mod_mode))
     if repl.history_file
         try
             f = open(find_hist_file(), true, true, true, false, false)
@@ -758,6 +786,7 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
     julia_prompt.hist = hp
     shell_mode.hist = hp
     help_mode.hist = hp
+    mod_mode.hist = hp
 
     search_prompt, skeymap = LineEdit.setup_search_keymap(hp)
     search_prompt.complete = LatexCompletions()
@@ -786,6 +815,18 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
                 end
             else
                 edit_insert(s, '?')
+            end
+        end,
+
+        '.' => function (s, o...)
+            if isempty(s) || position(LineEdit.buffer(s)) == 0
+                buf = copy(LineEdit.buffer(s))
+                LineEdit.transition(s, mod_mode) do
+                    LineEdit.state(s, mod_mode).input_buffer = buf
+                end
+            else
+                # don't do anything, just add the key as a standard character
+                LineEdit.edit_insert(s, '.')
             end
         end,
 
@@ -846,9 +887,9 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
     b = Dict{Any,Any}[skeymap, mk, prefix_keymap, LineEdit.history_keymap, LineEdit.default_keymap, LineEdit.escape_defaults]
     prepend!(b, extra_repl_keymap)
 
-    shell_mode.keymap_dict = help_mode.keymap_dict = LineEdit.keymap(b)
+    shell_mode.keymap_dict = help_mode.keymap_dict = mod_mode.keymap_dict = LineEdit.keymap(b)
 
-    ModalInterface([julia_prompt, shell_mode, help_mode, search_prompt, prefix_prompt])
+    ModalInterface([julia_prompt, shell_mode, help_mode, mod_mode, search_prompt, prefix_prompt])
 end
 
 function run_frontend(repl::LineEditREPL, backend)
