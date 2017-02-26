@@ -368,6 +368,8 @@ function _start()
         local term
         global active_repl
         global active_repl_backend
+        global active_repl_module
+        active_repl_module = Main
         if repl
             if !isa(STDIN,TTY)
                 global is_interactive |= !isa(STDIN, Union{File, IOStream})

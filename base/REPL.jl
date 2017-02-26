@@ -745,6 +745,15 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
             Expr(:call, :(Base.repl_cmd), macroexpand(Expr(:macrocall, Symbol("@cmd"),line)), outstream(repl))
         end)
 
+    # set up module mode
+    module_prompt = Prompt(string(Base.active_repl_module, "> ");
+        # Copy colors from the prompt object
+        prompt_prefix = hascolor ? repl.prompt_color : "",
+        prompt_suffix = hascolor ?
+            (repl.envcolors ? Base.input_color : repl.input_color) : "",
+        keymap_func_data = (repl, Main),
+        complete = replc,
+        on_enter = return_callback)
 
     ################################# Stage II #############################
 
@@ -752,7 +761,8 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
     # We will have a unified history for all REPL modes
     hp = REPLHistoryProvider(Dict{Symbol,Any}(:julia => julia_prompt,
                                               :shell => shell_mode,
-                                              :help  => help_mode))
+                                              :help  => help_mode,
+                                              :module => module_prompt))
     if repl.history_file
         try
             hist_path = find_hist_file()
@@ -770,9 +780,12 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
     julia_prompt.hist = hp
     shell_mode.hist = hp
     help_mode.hist = hp
+    module_prompt.hist = hp
 
     julia_prompt.on_done = respond(x->Base.parse_input_line(x,filename=repl_filename(repl,hp)), repl, julia_prompt)
-
+    module_prompt.on_done = respond(repl, module_prompt) do x
+        Expr(:call, :eval, Base.active_repl_module, :(Base.parse_input_line($x, filename=$(repl_filename(repl, hp)))))
+    end
 
     search_prompt, skeymap = LineEdit.setup_search_keymap(hp)
     search_prompt.complete = LatexCompletions()
@@ -802,6 +815,29 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
             else
                 edit_insert(s, '?')
             end
+        end,
+        '}' => function (s,o...)
+            buf = copy(LineEdit.buffer(s))
+            i = position(buf)
+            if i > 0 && buf.data[1] == UInt8('.')
+                local mod_name::Symbol
+                try
+                    mod_name = Symbol(buf.data[2:end])
+                catch e
+                    return  # we couldn't get a symbol...
+                end
+                if isdefined(Main, mod_name) && isa(eval(Main, mod_name), Module)
+                    mod = eval(Main, mod_name)
+                    global active_repl_module = mod
+                    # eval(Main, :(Base.active_repl_module = $mod))
+                    module_prompt.prompt = string(mod, "> ")
+                end
+                transition((args...) -> nothing, s, module_prompt)
+            else
+                # don't do anything, just add the key as a standard character
+                LineEdit.edit_insert(s, '}')
+            end
+
         end,
 
         # Bracketed Paste Mode
@@ -917,7 +953,7 @@ function setup_interface(repl::LineEditREPL; hascolor = repl.hascolor, extra_rep
     b = Dict{Any,Any}[skeymap, mk, prefix_keymap, LineEdit.history_keymap, LineEdit.default_keymap, LineEdit.escape_defaults]
     prepend!(b, extra_repl_keymap)
 
-    shell_mode.keymap_dict = help_mode.keymap_dict = LineEdit.keymap(b)
+    shell_mode.keymap_dict = help_mode.keymap_dict = module_prompt.keymap_dict = LineEdit.keymap(b)
 
     ModalInterface([julia_prompt, shell_mode, help_mode, search_prompt, prefix_prompt])
 end
